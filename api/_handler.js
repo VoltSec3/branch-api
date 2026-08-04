@@ -1,7 +1,8 @@
 // Branch roadmap API — shared handler.
 // This file is intentionally NOT a Vercel function (leading `_`); it is
-// re-exported by `index.js` (mounts at `/api`) and `[...slug].js` (mounts at
-// `/api/*`), which guarantees every subpath reaches the handler.
+// re-exported by `index.js` (`/api`), `courses.js` (`/api/courses`) and
+// `courses/[id].js` (`/api/courses/:id`), which guarantees every path reaches
+// the handler on Vercel.
 //
 // Endpoints (all under /api):
 //   GET    /api/courses          -> { courses: CourseSummary[] }   (newest first)

@@ -5,9 +5,13 @@ A tiny serverless backend for the **Branch roadmap** app. It powers the
 publish, browse, and load shared courses.
 
 The handler lives in `api/_handler.js` (shared logic) and is re-exported by
-two entry files so every path reaches it on Vercel:
-- `api/index.js` — serves the exact `/api` path
-- `api/[...slug].js` — catch-all that serves `/api/*`
+explicit entry files so Vercel's filesystem routing maps every path to it:
+- `api/index.js` — serves `/api`
+- `api/courses.js` — serves `/api/courses`
+- `api/courses/[id].js` — serves `/api/courses/:id`
+
+(An earlier `api/[...slug].js` catch-all was replaced because Vercel wasn't
+routing nested paths like `/api/courses/:id` to it.)
 
 No framework, no build step, no extra dependencies — just the Node runtime.
 The API is deployed as its own Vercel project (separate from the site).
@@ -135,8 +139,8 @@ automatically as serverless functions.
 1. Push this repo to GitHub (or GitLab/Bitbucket).
 2. In Vercel, **Add New → Project**, import the repo.
 3. **Framework Preset:** `Other` (no build command, no output directory).
-4. The `api/index.js` + `api/[...slug].js` pair mounts the handler at both
-   `/api` and `/api/*`.
+4. The entry files (`index.js`, `courses.js`, `courses/[id].js`) map `/api`,
+   `/api/courses`, and `/api/courses/:id` to the handler.
 5. Add environment variables (see above) under **Settings → Environment
    Variables**, then redeploy.
 
