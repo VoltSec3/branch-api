@@ -4,9 +4,13 @@ A tiny serverless backend for the **Branch roadmap** app. It powers the
 **Save → Upload to API** flow and the **TopBar → Course Browser**, letting anyone
 publish, browse, and load shared courses.
 
-The function lives in `api/index.js` and deploys as a Vercel serverless function
-alongside the static site. No framework, no build step, no extra dependencies —
-just the Node runtime.
+The handler lives in `api/_handler.js` (shared logic) and is re-exported by
+two entry files so every path reaches it on Vercel:
+- `api/index.js` — serves the exact `/api` path
+- `api/[...slug].js` — catch-all that serves `/api/*`
+
+No framework, no build step, no extra dependencies — just the Node runtime.
+The API is deployed as its own Vercel project (separate from the site).
 
 ## Endpoints
 
@@ -76,42 +80,55 @@ without a key).
 
 \* Without Redis env vars the function falls back to in-memory storage.
 
-The client app also accepts `VITE_API_BASE`, but you only need it when the API
-is on a different origin than the site. When everything is deployed to Vercel
-under one project, the API is same-origin and the client uses relative paths by
-default.
+The site is hosted separately (on your own server/domain) and talks to this API
+cross-origin. The site build needs `VITE_API_BASE` set to this project's base
+URL (no trailing slash) so the app calls `https://branch-api.vercel.app/api/...`:
+
+```bash
+# in the site repo, before building
+echo "VITE_API_BASE=https://branch-api.vercel.app" > .env.production
+npm run build
+```
+
+CORS is already enabled (`Access-Control-Allow-Origin: *`), so browser requests
+from any domain work.
 
 ## Local development
 
 ```bash
 npm i -g vercel
-vercel dev          # serves the static site AND /api on the same port
+vercel dev          # serves /api on http://localhost:3000
 ```
 
-Then open the printed localhost URL. Because `vercel dev` serves both the app
-and the API on one origin, no `VITE_API_BASE` is needed. To test persistent
-storage locally, add the Upstash env vars to a `.env` (or the Vercel CLI).
+Then run the site against it:
+
+```bash
+# in the site repo, in a separate terminal
+VITE_API_BASE=http://localhost:3000 npm run dev
+```
+
+To test persistent storage locally, add the Upstash env vars to a `.env` (or
+the Vercel CLI).
 
 ## Deploying to Vercel
 
+This repo is API-only (no framework preset). The `api/` folder is detected
+automatically as serverless functions.
+
 1. Push this repo to GitHub (or GitLab/Bitbucket).
 2. In Vercel, **Add New → Project**, import the repo.
-3. Vercel auto-detects Vite. Confirm:
-   - **Framework Preset:** `Vite`
-   - **Build Command:** `npm run build`
-   - **Output Directory:** `dist`
-4. The `api/` folder is detected automatically as a serverless function — no
-   extra config needed.
+3. **Framework Preset:** `Other` (no build command, no output directory).
+4. The `api/index.js` + `api/[...slug].js` pair mounts the handler at both
+   `/api` and `/api/*`.
 5. Add environment variables (see above) under **Settings → Environment
    Variables**, then redeploy.
-6. Deploy. The site and `/api/*` share the same domain.
 
 Optional `vercel.json` (only if you want a custom duration limit):
 
 ```json
 {
   "functions": {
-    "api/index.js": { "maxDuration": 10 }
+    "api/_handler.js": { "maxDuration": 10 }
   }
 }
 ```
