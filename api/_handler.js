@@ -158,13 +158,61 @@ function computeHours(nodes) {
   return Math.round(total * 10) / 10
 }
 
+function minifyNodes(nodes) {
+  return nodes
+    .map((n) => {
+      if (!n || typeof n !== "object") return null
+      const d = n.data && typeof n.data === "object" ? n.data : {}
+      const data = { kind: d.kind || "topic", title: typeof d.title === "string" ? d.title : "" }
+      if (typeof d.description === "string" && d.description) data.description = d.description
+      if (typeof d.icon === "string" && d.icon) data.icon = d.icon
+      if (typeof d.color === "string" && d.color) data.color = d.color
+      if (typeof d.difficulty === "string" && d.difficulty) data.difficulty = d.difficulty
+      const hours = Number(d.hours)
+      if (hours > 0) data.hours = hours
+      const progress = Number(d.progress)
+      if (progress > 0) data.progress = progress
+      if (d.expanded === true) data.expanded = true
+      if (d.collapsed === true) data.collapsed = true
+      if (Array.isArray(d.childIds) && d.childIds.length) data.childIds = d.childIds
+      if (typeof d.notes === "string" && d.notes) data.notes = d.notes
+      if (d.custom === true) data.custom = true
+      if (Array.isArray(d.requirements) && d.requirements.length) data.requirements = d.requirements
+      if (Array.isArray(d.checklist) && d.checklist.length) data.checklist = d.checklist
+      if (Array.isArray(d.stretchGoals) && d.stretchGoals.length) data.stretchGoals = d.stretchGoals
+      return {
+        id: typeof n.id === "string" ? n.id : "",
+        type: typeof n.type === "string" ? n.type : "graph",
+        position: {
+          x: Number(n.position && n.position.x) || 0,
+          y: Number(n.position && n.position.y) || 0,
+        },
+        data,
+      }
+    })
+    .filter(Boolean)
+}
+
+function minifyEdges(edges) {
+  return edges
+    .map((e) =>
+      e && typeof e === "object"
+        ? {
+            id: typeof e.id === "string" ? e.id : "",
+            source: typeof e.source === "string" ? e.source : "",
+            target: typeof e.target === "string" ? e.target : "",
+            type: "graph",
+          }
+        : null
+    )
+    .filter(Boolean)
+}
+
 function sanitizeCourse(body) {
   const name = typeof body.name === "string" ? body.name.trim() : ""
   if (!name) throw httpError(400, "name is required")
-  if (!Array.isArray(body.nodes)) throw httpError(400, "nodes must be an array")
-
-  const nodes = body.nodes
-  const edges = Array.isArray(body.edges) ? body.edges : []
+  const nodes = minifyNodes(Array.isArray(body.nodes) ? body.nodes : [])
+  const edges = minifyEdges(Array.isArray(body.edges) ? body.edges : [])
   const id =
     typeof body.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.id) ? body.id : generateId()
 
@@ -173,7 +221,6 @@ function sanitizeCourse(body) {
     ownerId: typeof body.ownerId === "string" ? body.ownerId.slice(0, 64) : "",
     name: name.slice(0, 200),
     description: typeof body.description === "string" ? body.description.slice(0, 2000) : "",
-    image: typeof body.image === "string" ? body.image.slice(0, 500000) : null,
     nodes,
     edges,
     viewport: body.viewport && typeof body.viewport === "object" ? body.viewport : null,
@@ -196,7 +243,6 @@ function toSummary(course) {
     id: course.id,
     name: course.name,
     description: course.description,
-    image: course.image,
     ownerId: course.ownerId,
     hours: course.hours,
     nodeCount: course.nodeCount,
@@ -263,6 +309,7 @@ export default async function handler(req, res) {
       if (req.method === "GET") {
         const course = await dbGet(courseKey(id))
         if (!course) throw httpError(404, "Course not found")
+        delete course.image
         return json(res, 200, { course })
       }
 

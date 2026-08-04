@@ -24,7 +24,7 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
 | ------ | ------------------ | --------------------------------------------------------------- |
 | `GET`  | `/api/courses`     | List course summaries, newest first: `{ courses: [...] }`       |
 | `POST` | `/api/courses`     | Create a course, or update one when `id` matches: `{ course }`  |
-| `GET`  | `/api/courses/:id` | Full course (name, description, image, nodes, edges, viewport)  |
+| `GET`  | `/api/courses/:id` | Full course (name, description, nodes, edges, viewport)        |
 | `DELETE` | `/api/courses/:id` | Remove a course: `{ ok: true }`                                 |
 
 ### Course summary shape
@@ -34,7 +34,6 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
   "id": "AbCdEfGhIjKlMnOpQrSt",   // 20 chars, letters/numbers/symbols
   "name": "My Course",
   "description": "...",
-  "image": "data:image/png;base64,...", // preview snapshot (nullable)
   "hours": 120,
   "nodeCount": 32,
   "createdAt": "2026-01-01T00:00:00.000Z",
@@ -49,12 +48,25 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
   "id": "optional; omit to create, or send an existing id to update in place",
   "name": "Required",
   "description": "...",
-  "image": "optional preview data URL",
-  "nodes": [],  // required — RoadmapNode[]
+  "nodes": [],  // required — RoadmapNode[] (see compression below)
   "edges": [],  // RoadmapEdge[]
   "viewport": null // optional
 }
 ```
+
+### Compression
+
+Courses are stored as compact as possible — no preview image, and every node is
+reduced to the essentials on write:
+
+- nodes keep only `id`, `type`, `position`, and `data`;
+- `data` keeps `kind` + `title` plus any non-default fields (description, icon,
+  color, difficulty, hours, progress, expanded, collapsed, childIds, notes,
+  custom, requirements, checklist, stretchGoals);
+- edges keep only `id`, `source`, `target`, `type`.
+
+The client compresses on upload and re-hydrates defaults (empty strings, `0`,
+`false`) when loading, so consumers can always rely on full node data.
 
 ## Storage
 
