@@ -64,11 +64,28 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
 Keys used: `branch:api:course:{id}`, `branch:api:summary:{id}`,
 `branch:api:index` (sorted set).
 
-## Optional write-protection
+## Uploader ownership
 
-Set an `API_KEY` env var. When present, `POST` and `DELETE` require the
-`x-api-key` header to match it. `GET` stays public (the course browser reads
-without a key).
+Each upload carries an `ownerId` (a stable id generated per browser and kept in
+localStorage). The API stores it on the course and only lets the owner change or
+delete it:
+
+- **Update**: `POST` with an existing `id` is rejected with `403` unless the
+  body's `ownerId` matches the stored one.
+- **Delete**: `DELETE` requires an `x-owner-id` header matching the stored
+  `ownerId`, otherwise `403`.
+
+`GET` stays public so anyone can browse and load courses. The course browser
+only shows the delete button for the current browser's own courses.
+
+Legacy courses uploaded before ownership was added have no `ownerId` and can
+only be removed with the admin key (below).
+
+## Optional admin key
+
+Set an `API_KEY` env var. When present, sending the `x-api-key` header with a
+matching value bypasses the ownership check for `POST`/`DELETE` — an admin
+override for legacy/abuse cases.
 
 ## Environment variables
 
@@ -76,7 +93,7 @@ without a key).
 | ---------------------------- | -------- | ----------------------------------------- |
 | `UPSTASH_REDIS_REST_URL`     | No\*     | Redis REST endpoint (persistent storage)  |
 | `UPSTASH_REDIS_REST_TOKEN`   | No\*     | Redis REST auth token                     |
-| `API_KEY`                    | No       | Write-protect POST/DELETE when set        |
+| `API_KEY`                    | No       | Admin key that bypasses ownership checks  |
 
 \* Without Redis env vars the function falls back to in-memory storage.
 

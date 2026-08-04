@@ -13,8 +13,11 @@
 // UPSTASH_REDIS_REST_TOKEN are set, and falls back to an in-memory map
 // otherwise (data resets whenever the function cold-starts).
 //
-// Optional API_KEY env: when set, POST and DELETE require an `x-api-key`
-// header matching it. GET stays public so the course browser can read it.
+// Courses are owned by the uploader. Uploads carry an `ownerId` (a stable
+// per-browser id). Updating or deleting a course requires the same `ownerId`
+// via the `x-owner-id` header. GET stays public so the course browser can read
+// it. Optional API_KEY env: when set, `x-api-key` matches bypass ownership
+// checks (admin override).
 
 import { randomBytes } from "node:crypto"
 
@@ -165,6 +168,7 @@ function sanitizeCourse(body) {
 
   return {
     id,
+    ownerId: typeof body.ownerId === "string" ? body.ownerId.slice(0, 64) : "",
     name: name.slice(0, 200),
     description: typeof body.description === "string" ? body.description.slice(0, 2000) : "",
     image: typeof body.image === "string" ? body.image.slice(0, 500000) : null,
@@ -177,9 +181,12 @@ function sanitizeCourse(body) {
 }
 
 function checkApiKey(req) {
-  if (!API_KEY) return
-  if (req.headers["x-api-key"] === API_KEY) return
-  throw httpError(401, "Invalid or missing x-api-key header")
+  return Boolean(API_KEY && req.headers["x-api-key"] === API_KEY)
+}
+
+function isOwner(course, req) {
+  const ownerId = req.headers["x-owner-id"] || ""
+  return Boolean(course.ownerId && course.ownerId === ownerId)
 }
 
 function toSummary(course) {
@@ -188,6 +195,7 @@ function toSummary(course) {
     name: course.name,
     description: course.description,
     image: course.image,
+    ownerId: course.ownerId,
     hours: course.hours,
     nodeCount: course.nodeCount,
     createdAt: course.createdAt,
@@ -220,12 +228,20 @@ export default async function handler(req, res) {
       }
 
       if (req.method === "POST") {
-        checkApiKey(req)
         const course = sanitizeCourse(parseBody(req))
         const now = new Date().toISOString()
         const existing = await dbGet(summaryKey(course.id))
+        if (
+          existing &&
+          existing.ownerId &&
+          existing.ownerId !== course.ownerId &&
+          !checkApiKey(req)
+        ) {
+          throw httpError(403, "This course belongs to another uploader")
+        }
         course.createdAt = existing && existing.createdAt ? existing.createdAt : now
         course.updatedAt = now
+        if (existing && existing.ownerId) course.ownerId = existing.ownerId
 
         await dbSet(courseKey(course.id), course)
         await dbSet(summaryKey(course.id), toSummary(course))
@@ -248,7 +264,11 @@ export default async function handler(req, res) {
       }
 
       if (req.method === "DELETE") {
-        checkApiKey(req)
+        const course = await dbGet(courseKey(id))
+        if (!course) throw httpError(404, "Course not found")
+        if (!isOwner(course, req) && !checkApiKey(req)) {
+          throw httpError(403, "You can only delete courses you uploaded")
+        }
         await dbDel(courseKey(id))
         await dbDel(summaryKey(id))
         await indexRemove(id)
