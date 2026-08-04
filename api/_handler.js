@@ -129,11 +129,12 @@ function httpError(status, message) {
   return err
 }
 
-function corsHeaders() {
+function corsHeaders(requestedHeaders) {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
+    "Access-Control-Allow-Headers":
+      requestedHeaders || "Content-Type, Authorization, x-api-key, x-owner-id",
   }
 }
 
@@ -206,7 +207,8 @@ function toSummary(course) {
 
 // ---- handler ----
 export default async function handler(req, res) {
-  for (const [k, v] of Object.entries(corsHeaders())) res.setHeader(k, v)
+  const requestedHeaders = req.headers["access-control-request-headers"]
+  for (const [k, v] of Object.entries(corsHeaders(requestedHeaders))) res.setHeader(k, v)
 
   if (req.method === "OPTIONS") {
     res.statusCode = 204
