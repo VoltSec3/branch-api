@@ -1,0 +1,10 @@
+{
+  "name": "branch-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless API for the Branch roadmap app",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  }
+}
