@@ -6,14 +6,17 @@ publish, browse, and load shared courses.
 
 The handler lives in `api/_handler.js` (shared logic) and is re-exported by
 explicit entry files so Vercel's filesystem routing maps every path to it:
-- `api/index.js` — serves `/api`
-- `api/courses.js` — serves `/api/courses`
-- `api/courses/[id].js` — serves `/api/courses/:id`
+- `api/index.js` - serves `/api`
+- `api/courses.js` - serves `/api/courses`
+- `api/courses/[id].js` - serves `/api/courses/:id`
+- `api/auth/signup.js` - serves `/api/auth/signup`
+- `api/auth/login.js` - serves `/api/auth/login`
+- `api/auth/logout.js` - serves `/api/auth/logout`
 
 (An earlier `api/[...slug].js` catch-all was replaced because Vercel wasn't
 routing nested paths like `/api/courses/:id` to it.)
 
-No framework, no build step, no extra dependencies — just the Node runtime.
+No framework, no build step, no extra dependencies - just the Node runtime.
 The API is deployed as its own Vercel project (separate from the site).
 
 ## Endpoints
@@ -22,10 +25,28 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
 
 | Method | Route              | Description                                                     |
 | ------ | ------------------ | --------------------------------------------------------------- |
+| `POST` | `/api/auth/signup` | Create an account from a username and password: `{ session }`   |
+| `POST` | `/api/auth/login`  | Sign in and get a session token: `{ session }`                  |
+| `POST` | `/api/auth/logout` | Invalidate the current token: `{ ok: true }`                    |
 | `GET`  | `/api/courses`     | List course summaries, newest first: `{ courses: [...] }`       |
 | `POST` | `/api/courses`     | Create a course, or update one when `id` matches: `{ course }`  |
-| `GET`  | `/api/courses/:id` | Full course (name, description, nodes, edges, viewport)        |
+| `GET`  | `/api/courses/:id` | Full course (name, description, nodes, edges, viewport)         |
 | `DELETE` | `/api/courses/:id` | Remove a course: `{ ok: true }`                                 |
+
+### Sessions
+
+Signup and login both return the same session shape. Keep the token and send it
+on every upload/delete via the `x-auth-token` header.
+
+```jsonc
+{
+  "session": {
+    "username": "roadmapper",
+    "ownerId": "AbCdEfGhIjKlMnOpQrSt",
+    "token": "30-char-random-token"
+  }
+}
+```
 
 ### Course summary shape
 
@@ -48,7 +69,7 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
   "id": "optional; omit to create, or send an existing id to update in place",
   "name": "Required",
   "description": "...",
-  "nodes": [],  // required — RoadmapNode[] (see compression below)
+  "nodes": [],  // required - RoadmapNode[] (see compression below)
   "edges": [],  // RoadmapEdge[]
   "viewport": null // optional
 }
@@ -56,7 +77,7 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
 
 ### Compression
 
-Courses are stored as compact as possible — no preview image, and every node is
+Courses are stored as compact as possible - no preview image, and every node is
 reduced to the essentials on write:
 
 - nodes keep only `id`, `type`, `position`, and `data`;
@@ -70,38 +91,45 @@ The client compresses on upload and re-hydrates defaults (empty strings, `0`,
 
 ## Storage
 
-- **Upstash Redis (recommended for production)** — set
+- **Upstash Redis (recommended for production)** - set
   `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (from the Upstash
   console, REST section). All data persists across cold starts.
-- **In-memory fallback** — if the env vars are missing, data is kept in a plain
+- **In-memory fallback** - if the env vars are missing, data is kept in a plain
   `Map` that resets whenever the function cold-starts. Fine for local testing,
   not for sharing.
 
 Keys used: `branch:api:course:{id}`, `branch:api:summary:{id}`,
-`branch:api:index` (sorted set).
+`branch:api:index` (sorted set), `branch:api:user:{username}`,
+`branch:api:session:{token}`. Accounts and sessions live in the same store, so
+no separate database is required.
 
-## Uploader ownership
+## Accounts and ownership
 
-Each upload carries an `ownerId` (a stable id generated per browser and kept in
-localStorage). The API stores it on the course and only lets the owner change or
-delete it:
+Publishing and deleting courses requires a signed-in account (username +
+password only, no email). Passwords are hashed with `scrypt` plus a per-user
+salt and are never stored in plain text.
 
-- **Update**: `POST` with an existing `id` is rejected with `403` unless the
-  body's `ownerId` matches the stored one.
-- **Delete**: `DELETE` requires an `x-owner-id` header matching the stored
-  `ownerId`, otherwise `403`.
+- **Signup**: `POST /api/auth/signup` with `{ username, password }`. Username is
+  3-30 characters using letters, numbers, dot, dash or underscore. Password is
+  6-128 characters. Returns a session.
+- **Login**: `POST /api/auth/login` with the same shape. Returns a session.
+- **Upload**: `POST /api/courses` requires `x-auth-token`. The stored `ownerId`
+  is always taken from the session, so the owner cannot be spoofed from the body.
+- **Delete**: `DELETE /api/courses/:id` requires `x-auth-token` and only the
+  course owner (or the admin key) can remove it, otherwise `403`.
+- **Logout**: `POST /api/auth/logout` invalidates the token server-side.
 
 `GET` stays public so anyone can browse and load courses. The course browser
-only shows the delete button for the current browser's own courses.
+only shows the delete button for courses owned by the signed-in account.
 
-Legacy courses uploaded before ownership was added have no `ownerId` and can
-only be removed with the admin key (below).
+Legacy courses uploaded before accounts existed have a browser-generated
+`ownerId` and can only be removed with the admin key (below).
 
 ## Optional admin key
 
 Set an `API_KEY` env var. When present, sending the `x-api-key` header with a
-matching value bypasses the ownership check for `POST`/`DELETE` — an admin
-override for legacy/abuse cases.
+matching value bypasses the ownership and auth checks for `POST`/`DELETE` - an
+admin override for legacy/abuse cases.
 
 ## Environment variables
 
@@ -151,8 +179,9 @@ automatically as serverless functions.
 1. Push this repo to GitHub (or GitLab/Bitbucket).
 2. In Vercel, **Add New → Project**, import the repo.
 3. **Framework Preset:** `Other` (no build command, no output directory).
-4. The entry files (`index.js`, `courses.js`, `courses/[id].js`) map `/api`,
-   `/api/courses`, and `/api/courses/:id` to the handler.
+4. The entry files (`index.js`, `courses.js`, `courses/[id].js`,
+   `auth/signup.js`, `auth/login.js`, `auth/logout.js`) map every `/api` path
+   to the handler.
 5. Add environment variables (see above) under **Settings → Environment
    Variables**, then redeploy.
 
@@ -169,9 +198,15 @@ Optional `vercel.json` (only if you want a custom duration limit):
 ## Manual smoke test
 
 ```bash
-# create
+# create an account (keeps token in a shell variable)
+TOKEN=$(curl -s -X POST https://<your-domain>/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"username":"demo","password":"secret123"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).session.token))")
+
+# create a course
 curl -X POST https://<your-domain>/api/courses \
   -H "Content-Type: application/json" \
+  -H "x-auth-token: $TOKEN" \
   -d '{"name":"Demo","nodes":[],"edges":[]}'
 
 # list
@@ -180,6 +215,9 @@ curl https://<your-domain>/api/courses
 # fetch one
 curl https://<your-domain>/api/courses/<id>
 
-# delete (with API_KEY set)
+# delete (as the owner)
+curl -X DELETE https://<your-domain>/api/courses/<id> -H "x-auth-token: $TOKEN"
+
+# delete as admin (with API_KEY set)
 curl -X DELETE https://<your-domain>/api/courses/<id> -H "x-api-key: <your key>"
 ```
