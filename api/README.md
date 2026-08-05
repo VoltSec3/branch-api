@@ -9,6 +9,8 @@ explicit entry files so Vercel's filesystem routing maps every path to it:
 - `api/index.js` - serves `/api`
 - `api/courses.js` - serves `/api/courses`
 - `api/courses/[id].js` - serves `/api/courses/:id`
+- `api/profile.js` - serves `/api/profile`
+- `api/profiles/[username].js` - serves `/api/profiles/:username`
 - `api/auth/signup.js` - serves `/api/auth/signup`
 - `api/auth/login.js` - serves `/api/auth/login`
 - `api/auth/logout.js` - serves `/api/auth/logout`
@@ -30,10 +32,52 @@ All routes are under `/api`. Responses are JSON. CORS is enabled for all origins
 | `POST` | `/api/auth/logout` | Invalidate the current token: `{ ok: true }`                    |
 | `GET`  | `/api/courses`     | List course summaries, newest first: `{ courses: [...] }`       |
 | `POST` | `/api/courses`     | Create a course, or update one when `id` matches: `{ course }`  |
-| `GET`  | `/api/courses/:id` | Full course (name, description, nodes, edges, viewport)         |
+| `GET`  | `/api/courses/:id` | Full course (name, description, nodes, edges, viewport, board)  |
 | `DELETE` | `/api/courses/:id` | Remove a course: `{ ok: true }`                                 |
+| `PUT`  | `/api/profile`     | Publish your public profile snapshot: `{ profile }`             |
+| `GET`  | `/api/profiles/:username` | Read a public profile: `{ profile }`                       |
+
+### Public profiles
+
+Profiles are a lightweight public snapshot the app can publish for shareable
+profile links (`#/u/<username>` in the app). Only signed-in accounts can
+publish, and only their own profile (`403` otherwise). Publishing requires the
+`x-auth-token` header.
+
+`GET /api/profiles/:username` is public. It returns the latest snapshot or
+`404` if the user never published one.
+
+```jsonc
+{
+  "profile": {
+    "username": "roadmapper",
+    "displayName": "Road Mapper",
+    "bio": "...",
+    "accentColor": "#6366f1",
+    "social": { "github": "roadmapper" },
+    "stats": { "totalHours": 12, "nodesCompleted": 7 },
+    "achievements": ["welcome", "first-quiz"],
+    "joinedAt": 1760000000000
+  }
+}
+```
 
 ### Sessions
+
+Signup and login both return the same session shape. Keep the token and send it
+on every upload/delete via the `x-auth-token` header.
+
+```jsonc
+{
+  "session": {
+    "username": "roadmapper",
+    "ownerId": "AbCdEfGhIjKlMnOpQrSt",
+    "token": "30-char-random-token"
+  }
+}
+```
+
+### Course summary shape
 
 Signup and login both return the same session shape. Keep the token and send it
 on every upload/delete via the `x-auth-token` header.
@@ -69,11 +113,35 @@ on every upload/delete via the `x-auth-token` header.
   "id": "optional; omit to create, or send an existing id to update in place",
   "name": "Required",
   "description": "...",
+  "type": "roadmap | board",      // optional, defaults to roadmap
+  "visibility": "public | private", // optional, defaults to public
+  "board": { ... },               // optional, only for board courses
   "nodes": [],  // required - RoadmapNode[] (see compression below)
   "edges": [],  // RoadmapEdge[]
   "viewport": null // optional
 }
 ```
+
+### Board courses
+
+Project Board courses send their whole board as a single `board` JSON object
+alongside the (usually empty) `nodes`/`edges`:
+
+```jsonc
+{
+  "board": {
+    "columns": [{ "id": "...", "title": "To Do", "color": "...", "cardIds": [] }],
+    "cards": {},
+    "labels": [],
+    "members": [],
+    "milestones": [],
+    "activity": []
+  }
+}
+```
+
+The object is stored and returned as-is (it is already compact enough to ship
+without compression).
 
 ### Compression
 
@@ -100,8 +168,9 @@ The client compresses on upload and re-hydrates defaults (empty strings, `0`,
 
 Keys used: `branch:api:course:{id}`, `branch:api:summary:{id}`,
 `branch:api:index` (sorted set), `branch:api:user:{username}`,
-`branch:api:session:{token}`. Accounts and sessions live in the same store, so
-no separate database is required.
+`branch:api:session:{token}`, `branch:api:profile:{username}`. Accounts,
+sessions, and profiles live in the same store, so no separate database is
+required.
 
 ## Accounts and ownership
 
@@ -180,7 +249,8 @@ automatically as serverless functions.
 2. In Vercel, **Add New → Project**, import the repo.
 3. **Framework Preset:** `Other` (no build command, no output directory).
 4. The entry files (`index.js`, `courses.js`, `courses/[id].js`,
-   `auth/signup.js`, `auth/login.js`, `auth/logout.js`) map every `/api` path
+   `profile.js`, `profiles/[username].js`, `auth/signup.js`,
+   `auth/login.js`, `auth/logout.js`) map every `/api` path
    to the handler.
 5. Add environment variables (see above) under **Settings → Environment
    Variables**, then redeploy.
@@ -220,4 +290,13 @@ curl -X DELETE https://<your-domain>/api/courses/<id> -H "x-auth-token: $TOKEN"
 
 # delete as admin (with API_KEY set)
 curl -X DELETE https://<your-domain>/api/courses/<id> -H "x-api-key: <your key>"
+
+# publish your public profile
+curl -X PUT https://<your-domain>/api/profile \
+  -H "Content-Type: application/json" \
+  -H "x-auth-token: $TOKEN" \
+  -d '{"username":"demo","displayName":"Demo","bio":"hi","accentColor":"#6366f1","social":{},"stats":{},"achievements":["welcome"]}'
+
+# read a public profile
+curl https://<your-domain>/api/profiles/demo
 ```

@@ -12,6 +12,8 @@
 //   POST   /api/courses                -> { course: CourseSummary }      (create, or update when body.id matches)
 //   GET    /api/courses/:id            -> { course: Course }
 //   DELETE /api/courses/:id            -> { ok: true }
+//   PUT    /api/profile                -> { profile: PublicProfile }     (publish own public profile)
+//   GET    /api/profiles/:username     -> { profile: PublicProfile }
 //
 // Storage uses Upstash Redis REST when UPSTASH_REDIS_REST_URL and
 // UPSTASH_REDIS_REST_TOKEN are set, and falls back to an in-memory map
@@ -35,6 +37,7 @@ const courseKey = (id) => `branch:api:course:${id}`
 const summaryKey = (id) => `branch:api:summary:${id}`
 const userKey = (username) => `branch:api:user:${String(username).toLowerCase()}`
 const sessionKey = (token) => `branch:api:session:${token}`
+const profileKey = (username) => `branch:api:profile:${String(username).toLowerCase()}`
 
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -173,7 +176,7 @@ function httpError(status, message) {
 function corsHeaders(requestedHeaders) {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers":
       requestedHeaders || "Content-Type, Authorization, x-api-key, x-auth-token",
   }
@@ -266,6 +269,9 @@ function sanitizeCourse(body) {
     name: name.slice(0, 200),
     description: typeof body.description === "string" ? body.description.slice(0, 2000) : "",
     notes: typeof body.notes === "string" ? body.notes.slice(0, 100000) : "",
+    type: body.type === "board" ? "board" : "roadmap",
+    visibility: body.visibility === "private" ? "private" : "public",
+    ...(body.board && typeof body.board === "object" ? { board: body.board } : {}),
     nodes,
     edges,
     viewport: body.viewport && typeof body.viewport === "object" ? body.viewport : null,
@@ -276,6 +282,49 @@ function sanitizeCourse(body) {
 
 function checkApiKey(req) {
   return Boolean(API_KEY && req.headers["x-api-key"] === API_KEY)
+}
+
+const ALLOWED_SOCIAL = new Set(["github", "linkedin", "portfolio", "website", "twitter"])
+
+function sanitizeProfile(body) {
+  const username = typeof body.username === "string" ? body.username.trim() : ""
+  if (!/^[A-Za-z0-9_.-]{3,30}$/.test(username)) {
+    throw httpError(400, "Invalid username")
+  }
+  const displayName =
+    typeof body.displayName === "string" ? body.displayName.trim().slice(0, 60) : username
+  const bio = typeof body.bio === "string" ? body.bio : ""
+  const social = {}
+  if (body.social && typeof body.social === "object") {
+    for (const key of ALLOWED_SOCIAL) {
+      const value = body.social[key]
+      if (typeof value === "string" && value.trim()) {
+        social[key] = value.trim().slice(0, 300)
+      }
+    }
+  }
+  const stats = {}
+  if (body.stats && typeof body.stats === "object") {
+    for (const key of Object.keys(body.stats)) {
+      const n = Number(body.stats[key])
+      if (Number.isFinite(n)) stats[key] = Math.round(n)
+    }
+  }
+  const achievements = Array.isArray(body.achievements)
+    ? body.achievements
+        .map((a) => (typeof a === "string" ? a.slice(0, 40) : ""))
+        .filter((a) => a)
+        .slice(0, 40)
+    : []
+  return {
+    username,
+    displayName: displayName || username,
+    bio: bio.slice(0, 500),
+    accentColor: typeof body.accentColor === "string" ? body.accentColor.slice(0, 20) : "#6366f1",
+    social,
+    stats,
+    achievements,
+  }
 }
 
 function toSummary(course) {
@@ -417,6 +466,29 @@ export default async function handler(req, res) {
       }
 
       throw httpError(405, "Method not allowed")
+    }
+
+    if (path === "profile") {
+      if (req.method !== "PUT") throw httpError(405, "Method not allowed")
+      const session = await requireAuth(req)
+      const profile = sanitizeProfile(parseBody(req))
+      if (String(profile.username).toLowerCase() !== String(session.username).toLowerCase()) {
+        throw httpError(403, "You can only publish your own profile")
+      }
+      const user = await dbGet(userKey(profile.username))
+      const joinedAt = user && user.createdAt ? new Date(user.createdAt).getTime() : Date.now()
+      const record = { ...profile, joinedAt, updatedAt: new Date().toISOString() }
+      await dbSet(profileKey(profile.username), record)
+      return json(res, 200, { profile: record })
+    }
+
+    const profileMatch = path.match(/^profiles\/([^/]+)$/)
+    if (profileMatch) {
+      if (req.method !== "GET") throw httpError(405, "Method not allowed")
+      const username = profileMatch[1]
+      const record = await dbGet(profileKey(username))
+      if (!record) throw httpError(404, "Profile not found")
+      return json(res, 200, { profile: record })
     }
 
     throw httpError(404, "Not found")
