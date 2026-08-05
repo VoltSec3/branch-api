@@ -316,6 +316,37 @@ function sanitizeProfile(body) {
         .filter((a) => a)
         .slice(0, 40)
     : []
+  const skills = Array.isArray(body.skills)
+    ? body.skills.map((s) => (typeof s === "string" ? s.trim().slice(0, 40) : "")).filter((s) => s).slice(0, 40)
+    : []
+  const languages = Array.isArray(body.languages)
+    ? body.languages
+        .map((l) =>
+          l && typeof l === "object"
+            ? {
+                name: typeof l.name === "string" ? l.name.trim().slice(0, 40) : "",
+                level: typeof l.level === "string" ? l.level.trim().slice(0, 20) : "",
+              }
+            : null
+        )
+        .filter((l) => l && l.name)
+        .slice(0, 20)
+    : []
+  const courses = Array.isArray(body.courses)
+    ? body.courses
+        .map((c) =>
+          c && typeof c === "object"
+            ? {
+                id: typeof c.id === "string" ? c.id.slice(0, 60) : "",
+                name: typeof c.name === "string" ? c.name.trim().slice(0, 120) : "",
+                type: c.type === "board" ? "board" : "roadmap",
+                pct: Number.isFinite(Number(c.pct)) ? Math.min(100, Math.max(0, Math.round(Number(c.pct)))) : 0,
+              }
+            : null
+        )
+        .filter((c) => c && c.id)
+        .slice(0, 40)
+    : []
   return {
     username,
     displayName: displayName || username,
@@ -324,6 +355,10 @@ function sanitizeProfile(body) {
     social,
     stats,
     achievements,
+    skills,
+    languages,
+    courses,
+    joinedAt: typeof body.joinedAt === "number" ? body.joinedAt : Date.now(),
   }
 }
 
