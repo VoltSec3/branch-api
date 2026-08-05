@@ -6,5 +6,11 @@
   "type": "module",
   "engines": {
     "node": ">=20"
+  },
+  "scripts": {
+    "ws": "node ws/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
   }
 }

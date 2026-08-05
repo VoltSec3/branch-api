@@ -8,12 +8,21 @@
 //   POST   /api/auth/signup            -> { session }   (username + password only)
 //   POST   /api/auth/login             -> { session }
 //   POST   /api/auth/logout            -> { ok: true }
-//   GET    /api/courses                -> { courses: CourseSummary[] }   (newest first)
-//   POST   /api/courses                -> { course: CourseSummary }      (create, or update when body.id matches)
-//   GET    /api/courses/:id            -> { course: Course }
+//   GET    /api/courses                -> { courses: CourseSummary[] }   (approved only, newest first)
+//   POST   /api/courses                -> { course: CourseSummary }      (create/update; new uploads start "pending")
+//   GET    /api/courses/:id            -> { course: Course }             (owner/admin can read non-approved)
 //   DELETE /api/courses/:id            -> { ok: true }
 //   PUT    /api/profile                -> { profile: PublicProfile }     (publish own public profile)
 //   GET    /api/profiles/:username     -> { profile: PublicProfile }
+//
+// Moderation (admin only, see ADMIN_USERNAMES below):
+//   GET    /api/admin/me               -> { admin, username }
+//   GET    /api/admin/moderation        -> { items: CourseSummary[] }    (?status=pending|approved|rejected|dismissed)
+//   POST   /api/admin/courses/:id/:action   (approve|reject|dismiss)
+//   GET    /api/admin/banned            -> { users: BannedUser[] }
+//   POST   /api/admin/users/:username/ban     { reason? }
+//   POST   /api/admin/users/:username/unban
+//   GET    /api/admin/audit             -> { entries: AuditEntry[] }
 //
 // Storage uses Upstash Redis REST when UPSTASH_REDIS_REST_URL and
 // UPSTASH_REDIS_REST_TOKEN are set, and falls back to an in-memory map
@@ -31,13 +40,29 @@ import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto"
 const REST_URL = process.env.UPSTASH_REDIS_REST_URL || ""
 const REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || ""
 const API_KEY = process.env.API_KEY || ""
+const ADMIN_USERNAMES = (process.env.ADMIN_USERNAMES || "arc")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean)
 
 const INDEX_KEY = "branch:api:index"
+const BANNED_KEY = "branch:api:banned"
+const AUDIT_KEY = "branch:api:audit"
 const courseKey = (id) => `branch:api:course:${id}`
 const summaryKey = (id) => `branch:api:summary:${id}`
 const userKey = (username) => `branch:api:user:${String(username).toLowerCase()}`
 const sessionKey = (token) => `branch:api:session:${token}`
 const profileKey = (username) => `branch:api:profile:${String(username).toLowerCase()}`
+
+function isAdminUsername(username) {
+  return ADMIN_USERNAMES.includes(String(username || "").trim().toLowerCase())
+}
+
+function courseStatus(course) {
+  return ["pending", "approved", "rejected", "dismissed"].includes(course?.status)
+    ? course.status
+    : "approved"
+}
 
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -70,7 +95,61 @@ async function requireAuth(req) {
   if (!token) throw httpError(401, "Sign in to upload or manage courses")
   const session = await dbGet(sessionKey(token))
   if (!session) throw httpError(401, "Session expired, please sign in again")
+  const user = await dbGet(userKey(session.username))
+  if (user?.bannedAt) throw httpError(403, "This account has been banned")
+  return {
+    ...session,
+    admin: session.admin === true || isAdminUsername(session.username),
+  }
+}
+
+// Returns the session when a valid token is present, otherwise null. Used to
+// allow owners/admins into non-approved courses without requiring sign-in for
+// public content.
+async function tryAuth(req) {
+  if (checkApiKey(req)) {
+    return { username: "admin", ownerId: `admin:${API_KEY.slice(0, 8)}`, admin: true }
+  }
+  const token = req.headers["x-auth-token"] || ""
+  if (!token) return null
+  const session = await dbGet(sessionKey(token))
+  if (!session) return null
+  const user = await dbGet(userKey(session.username))
+  if (user?.bannedAt) throw httpError(403, "This account has been banned")
+  return {
+    ...session,
+    admin: session.admin === true || isAdminUsername(session.username),
+  }
+}
+
+async function requireAdmin(req) {
+  const session = await requireAuth(req)
+  if (!session.admin) throw httpError(403, "Moderator privileges required")
   return session
+}
+
+async function appendAudit(actor, action, detail) {
+  const entry = {
+    id: generateId(),
+    action,
+    detail,
+    actor,
+    createdAt: new Date().toISOString(),
+  }
+  const existing = await dbGet(AUDIT_KEY)
+  const list = Array.isArray(existing) ? existing : []
+  await dbSet(AUDIT_KEY, [entry, ...list].slice(0, 200))
+}
+
+async function getBannedList() {
+  const list = await dbGet(BANNED_KEY)
+  return Array.isArray(list) ? list : []
+}
+
+async function isUsernameBanned(username) {
+  const list = await getBannedList()
+  const key = String(username || "").trim().toLowerCase()
+  return list.some((b) => String(b.username || "").toLowerCase() === key)
 }
 
 async function createSessionFor(user) {
@@ -78,9 +157,10 @@ async function createSessionFor(user) {
   await dbSet(sessionKey(token), {
     username: user.username,
     ownerId: user.ownerId,
+    role: isAdminUsername(user.username) ? "admin" : "user",
     createdAt: new Date().toISOString(),
   })
-  return { username: user.username, ownerId: user.ownerId, token }
+  return { username: user.username, ownerId: user.ownerId, token, role: isAdminUsername(user.username) ? "admin" : "user" }
 }
 
 function redisConfigured() {
@@ -367,9 +447,12 @@ function toSummary(course) {
     id: course.id,
     name: course.name,
     description: course.description,
+    type: course.type,
     ownerId: course.ownerId,
+    uploader: typeof course.uploader === "string" ? course.uploader : "",
     hours: course.hours,
     nodeCount: course.nodeCount,
+    status: courseStatus(course),
     createdAt: course.createdAt,
     updatedAt: course.updatedAt,
   }
@@ -396,6 +479,9 @@ export default async function handler(req, res) {
       if (await dbGet(userKey(username))) {
         throw httpError(409, "That username is already taken")
       }
+      if (await isUsernameBanned(username)) {
+        throw httpError(403, "This username is banned from the platform")
+      }
       const salt = generateId(16)
       const user = {
         username: String(username).trim(),
@@ -421,6 +507,7 @@ export default async function handler(req, res) {
       if (!user || !salt || !expected) {
         throw httpError(401, "Invalid username or password")
       }
+      if (user.bannedAt) throw httpError(403, "This account has been banned")
       const actual = Buffer.from(hashPassword(password, salt), "hex")
       const want = Buffer.from(expected, "hex")
       if (actual.length !== want.length || !timingSafeEqual(actual, want)) {
@@ -443,7 +530,7 @@ export default async function handler(req, res) {
         const courses = []
         for (const { id } of list) {
           const summary = await dbGet(summaryKey(id))
-          if (summary) courses.push(summary)
+          if (summary && courseStatus(summary) === "approved") courses.push(summary)
         }
         return json(res, 200, { courses })
       }
@@ -465,10 +552,27 @@ export default async function handler(req, res) {
         course.createdAt = existing && existing.createdAt ? existing.createdAt : now
         course.updatedAt = now
         if (existing && existing.ownerId) course.ownerId = existing.ownerId
+        if (existing && typeof existing.uploader === "string" && existing.uploader) {
+          course.uploader = existing.uploader
+        } else {
+          course.uploader = session.username
+        }
+        course.status = session.admin
+          ? existing && courseStatus(existing) !== "approved"
+            ? courseStatus(existing)
+            : "approved"
+          : "pending"
 
         await dbSet(courseKey(course.id), course)
         await dbSet(summaryKey(course.id), toSummary(course))
         await indexAdd(course.id, Date.parse(course.createdAt))
+        if (!session.admin) {
+          await appendAudit(
+            session.username,
+            "content.uploaded",
+            `"${course.name}" (${course.id}) queued for review`
+          )
+        }
 
         return json(res, 200, { course: toSummary(course) })
       }
@@ -483,6 +587,13 @@ export default async function handler(req, res) {
       if (req.method === "GET") {
         const course = await dbGet(courseKey(id))
         if (!course) throw httpError(404, "Course not found")
+        if (courseStatus(course) !== "approved") {
+          const session = await tryAuth(req)
+          const isOwner = session && course.ownerId === session.ownerId
+          if (!isOwner && !(session && session.admin)) {
+            throw httpError(403, "This course is awaiting review and isn't public yet")
+          }
+        }
         delete course.image
         return json(res, 200, { course })
       }
@@ -501,6 +612,106 @@ export default async function handler(req, res) {
       }
 
       throw httpError(405, "Method not allowed")
+    }
+
+    if (path === "admin/me") {
+      if (req.method !== "GET") throw httpError(405, "Method not allowed")
+      const session = await requireAdmin(req)
+      return json(res, 200, { admin: true, username: session.username })
+    }
+
+    if (path === "admin/moderation") {
+      if (req.method !== "GET") throw httpError(405, "Method not allowed")
+      await requireAdmin(req)
+      const status = url.searchParams.get("status") || ""
+      const list = await indexList()
+      const items = []
+      for (const { id } of list) {
+        const summary = await dbGet(summaryKey(id))
+        if (!summary) continue
+        if (status && courseStatus(summary) !== status) continue
+        items.push(summary)
+      }
+      return json(res, 200, { items })
+    }
+
+    if (path === "admin/banned") {
+      if (req.method !== "GET") throw httpError(405, "Method not allowed")
+      await requireAdmin(req)
+      return json(res, 200, { users: await getBannedList() })
+    }
+
+    if (path === "admin/audit") {
+      if (req.method !== "GET") throw httpError(405, "Method not allowed")
+      await requireAdmin(req)
+      const entries = await dbGet(AUDIT_KEY)
+      return json(res, 200, { entries: Array.isArray(entries) ? entries : [] })
+    }
+
+    const adminCourseMatch = path.match(/^admin\/courses\/([^/]+)\/(approve|reject|dismiss)$/)
+    if (adminCourseMatch) {
+      if (req.method !== "POST") throw httpError(405, "Method not allowed")
+      const session = await requireAdmin(req)
+      const id = adminCourseMatch[1]
+      const action = adminCourseMatch[2]
+      const course = await dbGet(courseKey(id))
+      if (!course) throw httpError(404, "Course not found")
+      course.status = action
+      course.reviewedAt = new Date().toISOString()
+      course.reviewedBy = session.username
+      await dbSet(courseKey(id), course)
+      await dbSet(summaryKey(id), toSummary(course))
+      await appendAudit(
+        session.username,
+        `content.${action === "dismiss" ? "dismissed" : action}`,
+        `"${course.name}" (${id}) by ${course.uploader || course.ownerId}`
+      )
+      return json(res, 200, { course: toSummary(course) })
+    }
+
+    const adminUserMatch = path.match(/^admin\/users\/([^/]+)\/(ban|unban)$/)
+    if (adminUserMatch) {
+      if (req.method !== "POST") throw httpError(405, "Method not allowed")
+      const session = await requireAdmin(req)
+      const username = adminUserMatch[1]
+      const action = adminUserMatch[2]
+      if (isAdminUsername(username)) {
+        throw httpError(403, "Moderators cannot be banned")
+      }
+      let list = await getBannedList()
+      const key = username.trim().toLowerCase()
+      if (action === "ban") {
+        if (!list.some((b) => String(b.username || "").toLowerCase() === key)) {
+          const reason = parseBody(req).reason
+          list = [
+            {
+              username,
+              reason: typeof reason === "string" && reason.trim() ? reason.trim().slice(0, 300) : "No reason given",
+              bannedAt: Date.now(),
+              bannedBy: session.username,
+            },
+            ...list,
+          ]
+        }
+        const user = await dbGet(userKey(username))
+        if (user) {
+          user.bannedAt = new Date().toISOString()
+          user.bannedBy = session.username
+          await dbSet(userKey(username), user)
+        }
+        await appendAudit(session.username, "user.banned", `Banned ${username}`)
+      } else {
+        list = list.filter((b) => String(b.username || "").toLowerCase() !== key)
+        const user = await dbGet(userKey(username))
+        if (user) {
+          delete user.bannedAt
+          delete user.bannedBy
+          await dbSet(userKey(username), user)
+        }
+        await appendAudit(session.username, "user.unbanned", `Unbanned ${username}`)
+      }
+      await dbSet(BANNED_KEY, list)
+      return json(res, 200, { ok: true, users: list })
     }
 
     if (path === "profile") {
@@ -523,7 +734,13 @@ export default async function handler(req, res) {
       const username = profileMatch[1]
       const record = await dbGet(profileKey(username))
       if (!record) throw httpError(404, "Profile not found")
-      return json(res, 200, { profile: record })
+      const user = await dbGet(userKey(username))
+      return json(res, 200, {
+        profile: {
+          ...record,
+          banned: Boolean(user?.bannedAt) || (await isUsernameBanned(username)),
+        },
+      })
     }
 
     throw httpError(404, "Not found")
